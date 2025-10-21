@@ -9,21 +9,19 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 app.use(bodyParser.json());
 
-// 📁 Configuración de base de datos
+// 📁 Configurar la base de datos
 const DATA_DIR = path.join(__dirname, 'data');
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-}
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
 
 const DB_PATH = path.join(DATA_DIR, 'data.db');
 const db = new sqlite3.Database(DB_PATH);
 
-// 🧪 Prueba de servidor
+// Ruta de prueba
 app.get('/api/test', (req, res) => {
-  res.json({ status: 'ok', message: 'Servidor activo - Cárdenas Online' });
+  res.json({ status: 'ok', message: 'Servidor Cárdenas Online operativo' });
 });
 
-// 🧍 Registro de usuario
+// 🧍 Registro de usuarios
 app.post('/api/register', (req, res) => {
   const { nombre, pin, telefono, domicilio } = req.body;
   if (!nombre || !pin) return res.status(400).json({ error: 'Faltan campos requeridos' });
@@ -43,25 +41,23 @@ app.post('/api/register', (req, res) => {
   );
 });
 
-// 🔐 Login con sesión exclusiva
+// 🔐 Login con sesión única
 app.post('/api/login', (req, res) => {
   const { nombre, pin } = req.body;
-  if (!nombre || !pin)
-    return res.status(400).json({ error: 'Debe ingresar nombre y pin' });
+  if (!nombre || !pin) return res.status(400).json({ error: 'Debe ingresar nombre y pin' });
 
   db.get(`SELECT * FROM usuarios WHERE nombre = ? AND pin = ?`, [nombre, pin], (err, user) => {
     if (err) return res.status(500).json({ error: err.message });
     if (!user) return res.status(401).json({ error: 'Credenciales inválidas' });
 
     if (user.estado !== 'activo') {
-      return res.status(403).json({ error: `Cuenta suspendida (${user.estado})` });
+      return res.status(403).json({ error: 'Cuenta suspendida o inactiva' });
     }
 
-    // 🧹 Eliminar sesión anterior si existía
+    // 💡 Eliminar cualquier sesión anterior activa del mismo usuario
     db.run(`DELETE FROM sesiones WHERE usuario_id = ?`, [user.id], (err2) => {
-      if (err2) console.error('Error limpiando sesiones previas:', err2);
+      if (err2) console.error('Error al limpiar sesión previa:', err2);
 
-      // 🔑 Crear nueva sesión exclusiva
       const token = uuidv4();
       db.run(
         `INSERT INTO sesiones (token, usuario_id) VALUES (?, ?)`,
@@ -84,14 +80,14 @@ app.post('/api/login', (req, res) => {
   });
 });
 
-// 🚪 Logout
+// 🚪 Cerrar sesión
 app.post('/api/logout', (req, res) => {
   const { token } = req.body;
   if (!token) return res.status(400).json({ error: 'Falta token' });
 
   db.run(`DELETE FROM sesiones WHERE token = ?`, [token], (err) => {
     if (err) return res.status(500).json({ error: err.message });
-    res.json({ success: true, message: 'Sesión cerrada correctamente' });
+    res.json({ success: true });
   });
 });
 
@@ -114,7 +110,7 @@ app.post('/api/session', (req, res) => {
   );
 });
 
-// 🚀 Iniciar servidor
+// Iniciar servidor
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor Cárdenas Online activo en puerto ${PORT}`);
