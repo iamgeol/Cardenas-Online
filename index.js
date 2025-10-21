@@ -14,13 +14,16 @@ const DATA_DIR = path.join(__dirname, 'data');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const DB_PATH = path.join(DATA_DIR, 'data.db');
-const db = new sqlite3.Database(DB_PATH); // Conexión persistente
+const db = new sqlite3.Database(DB_PATH); // conexión persistente
 
-// Variables admin
+// Variables de entorno para admin y tienda
 const ADMIN_USER = process.env.ADMIN_USER;
 const ADMIN_PIN = process.env.ADMIN_PIN;
+const TIENDA_LAT = parseFloat(process.env.TIENDA_LAT || 0);
+const TIENDA_LNG = parseFloat(process.env.TIENDA_LNG || 0);
+const MAX_KM = parseFloat(process.env.MAX_KM || 10);
 
-// Inicialización admin
+// Inicialización de usuario admin
 db.serialize(() => {
   if (ADMIN_USER && ADMIN_PIN) {
     db.get(`SELECT * FROM usuarios WHERE nombre = ?`, [ADMIN_USER], (err, row) => {
@@ -39,7 +42,7 @@ db.serialize(() => {
   } else console.log("⚠️ Variables ADMIN_USER y ADMIN_PIN no configuradas.");
 });
 
-// Función para validar rango de entrega
+// ----------------- Funciones auxiliares -----------------
 function dentroDelRango(latUser, lngUser, latTienda, lngTienda, maxKm) {
   const R = 6371;
   const dLat = (latTienda - latUser) * Math.PI / 180;
@@ -54,12 +57,10 @@ function dentroDelRango(latUser, lngUser, latTienda, lngTienda, maxKm) {
 }
 
 // ----------------- Rutas públicas -----------------
-// Test
 app.get('/api/test', (req, res) => {
   res.json({ status: 'ok', message: 'Servidor Cárdenas Online operativo' });
 });
 
-// Registro
 app.post('/api/register', (req, res) => {
   const { nombre, pin, telefono, domicilio, latitud, longitud } = req.body;
   if (!nombre || !pin) return res.status(400).json({ error: 'Faltan campos requeridos' });
@@ -77,7 +78,6 @@ app.post('/api/register', (req, res) => {
   );
 });
 
-// Login con sesión única y suspensión
 app.post('/api/login', (req, res) => {
   const { nombre, pin } = req.body;
   if (!nombre || !pin) return res.status(400).json({ error: 'Debe ingresar nombre y pin' });
@@ -111,7 +111,6 @@ app.post('/api/login', (req, res) => {
   });
 });
 
-// Logout
 app.post('/api/logout', (req, res) => {
   const { token } = req.body;
   if (!token) return res.status(400).json({ error: 'Falta token' });
@@ -122,7 +121,6 @@ app.post('/api/logout', (req, res) => {
   });
 });
 
-// Verificar sesión
 app.post('/api/session', (req, res) => {
   const { token } = req.body;
   if (!token) return res.status(400).json({ error: 'Falta token' });
@@ -154,7 +152,6 @@ function esAdmin(req, res, next) {
   );
 }
 
-// Admin: Enviar avisos
 app.post('/api/admin/avisos', esAdmin, (req, res) => {
   const { usuario_id, mensaje, tipo } = req.body;
   if (!usuario_id || !mensaje) return res.status(400).json({ error: 'Faltan campos' });
@@ -165,7 +162,6 @@ app.post('/api/admin/avisos', esAdmin, (req, res) => {
   });
 });
 
-// Admin: Suspender usuario
 app.post('/api/admin/usuarios/:id/suspender', esAdmin, (req, res) => {
   const { id } = req.params;
   const { hasta } = req.body;
@@ -181,7 +177,6 @@ app.post('/api/admin/usuarios/:id/suspender', esAdmin, (req, res) => {
   );
 });
 
-// Admin: Estadísticas básicas
 app.get('/api/admin/estadisticas', esAdmin, (req, res) => {
   db.all(
     `SELECT p.nombre, SUM(vi.cantidad) as unidades_vendidas, SUM(vi.cantidad*vi.precio_unit) as ingresos
@@ -207,21 +202,16 @@ app.post('/api/checkout', (req, res) => {
     (err, user) => {
       if (err || !user) return res.status(401).json({ error: 'Sesión inválida' });
 
-      const TIENDA_LAT = parseFloat(process.env.TIENDA_LAT || 0);
-      const TIENDA_LNG = parseFloat(process.env.TIENDA_LNG || 0);
-      const MAX_KM = parseFloat(process.env.MAX_KM || 10);
-
       if (!dentroDelRango(entregaLat, entregaLng, TIENDA_LAT, TIENDA_LNG, MAX_KM)) {
         return res.status(400).json({ error: 'Domicilio fuera del rango de entrega' });
       }
 
-      // Aquí se podría calcular total de carrito, aplicar bonos y descuentos
-      // Para no romper el código existente, dejamos un placeholder:
+      // Placeholder para calcular total, aplicar bonos y descuentos
       res.json({ success: true, message: 'Checkout válido, aplicar cálculos de bonos y descuentos aquí' });
     }
   );
 });
 
-// Iniciar servidor
+// ----------------- Iniciar servidor -----------------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Servidor Cárdenas Online activo en puerto ${PORT}`));
