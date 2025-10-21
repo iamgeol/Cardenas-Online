@@ -10,7 +10,7 @@ const DB_PATH = path.join(DATA_DIR, 'data.db');
 const db = new sqlite3.Database(DB_PATH);
 
 db.serialize(() => {
-  // Tabla de usuarios
+  // Usuarios
   db.run(`CREATE TABLE IF NOT EXISTS usuarios (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     nombre TEXT UNIQUE,
@@ -26,14 +26,14 @@ db.serialize(() => {
     fecha_registro TEXT DEFAULT (datetime('now'))
   )`);
 
-  // Tabla de sesiones (tokens)
+  // Sesiones
   db.run(`CREATE TABLE IF NOT EXISTS sesiones (
     token TEXT PRIMARY KEY,
     usuario_id INTEGER,
     creado_en TEXT DEFAULT (datetime('now'))
   )`);
 
-  // Tabla de productos
+  // Productos
   db.run(`CREATE TABLE IF NOT EXISTS productos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     nombre TEXT,
@@ -45,7 +45,7 @@ db.serialize(() => {
     creado_en TEXT DEFAULT (datetime('now'))
   )`);
 
-  // Carritos temporales
+  // Carritos
   db.run(`CREATE TABLE IF NOT EXISTS carritos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     usuario_id INTEGER,
@@ -73,7 +73,7 @@ db.serialize(() => {
     precio_unit REAL
   )`);
 
-  // Avisos (incluye retrasos)
+  // Avisos
   db.run(`CREATE TABLE IF NOT EXISTS avisos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     usuario_id INTEGER,
@@ -84,13 +84,13 @@ db.serialize(() => {
     leido INTEGER DEFAULT 0
   )`);
 
-  // Configuración general
+  // Config
   db.run(`CREATE TABLE IF NOT EXISTS config (
     key TEXT PRIMARY KEY,
     value TEXT
   )`);
 
-  // Descuentos globales por producto
+  // Descuentos globales
   db.run(`CREATE TABLE IF NOT EXISTS descuentos_productos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     producto_id INTEGER,
@@ -104,14 +104,14 @@ db.serialize(() => {
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     usuario_id INTEGER,
     tipo TEXT, -- 'bono' o 'descuento'
-    valor REAL, -- porcentaje o monto
-    aplicado_en TEXT, -- producto_id o null para general
+    valor REAL,
+    aplicado_en TEXT,
     motivo TEXT,
     fecha TEXT DEFAULT (datetime('now')),
     usado INTEGER DEFAULT 0
   )`);
 
-  // Config default ventas suspendidas
+  // Config default ventas_suspendidas
   db.get(`SELECT value FROM config WHERE key='ventas_suspendidas'`, (err, row) => {
     if (!row) db.run(`INSERT INTO config (key, value) VALUES ('ventas_suspendidas','0')`);
   });
