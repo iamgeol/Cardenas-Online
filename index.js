@@ -47,160 +47,186 @@ inicializarDB((db) => {
     return R * c <= maxKm;
   }
 
-  // ----------------- Rutas públicas -----------------
-  app.get('/api/test', (req, res) => {
-    res.json({ status: 'ok', message: 'Servidor Cárdenas Online operativo' });
-  });
+  function generarAviso(db, usuarioId, mensaje, tipo='info') {
+    db.run(`INSERT INTO avisos (usuario_id, mensaje, tipo) VALUES (?, ?, ?)`, [usuarioId, mensaje, tipo]);
+  }
 
-  app.post('/api/register', (req, res) => {
-    const { nombre, pin, telefono, domicilio, latitud, longitud } = req.body;
-    if (!nombre || !pin) return res.status(400).json({ error: 'Faltan campos requeridos' });
+  // ----------------- Checkout y funciones auxiliares -----------------
+  function asignarBloqueEntrega(db, fechaDeseada, callback) {
+    const bloqueHoras = 3;
+    const maxPorBloque = 10;
+    const bloqueInicio = new Date(fechaDeseada);
+    bloqueInicio.setMinutes(0,0,0);
 
-    db.run(
-      `INSERT INTO usuarios (nombre, pin, telefono, domicilio, latitud, longitud) VALUES (?, ?, ?, ?, ?, ?)`,
-      [nombre, pin, telefono || '', domicilio || '', latitud || 0, longitud || 0],
-      function (err) {
-        if (err) {
-          if (err.message.includes('UNIQUE')) return res.status(400).json({ error: 'El nombre de usuario ya existe' });
-          return res.status(500).json({ error: err.message });
+    function contarBloque(bloque, cb) {
+      const bloqueFin = new Date(bloque);
+      bloqueFin.setHours(bloque.getHours() + bloqueHoras);
+      db.get(
+        `SELECT COUNT(*) as count FROM ventas WHERE entrega >= ? AND entrega < ?`,
+        [bloque.toISOString(), bloqueFin.toISOString()],
+        (err, row) => {
+          if (err) return cb(err);
+          cb(null, row.count, bloque);
         }
-        res.json({ success: true, id: this.lastID });
+      );
+    }
+
+    function buscarBloqueDisponible(bloque, cb) {
+      contarBloque(bloque, (err, count, inicio) => {
+        if (err) return cb(err);
+        if (count < maxPorBloque) return cb(null, inicio);
+        const siguienteBloque = new Date(inicio);
+        siguienteBloque.setHours(siguienteBloque.getHours() + bloqueHoras);
+        buscarBloqueDisponible(siguienteBloque, cb);
+      });
+    }
+
+    buscarBloqueDisponible(bloqueInicio, callback);
+  }
+
+  function calcularTotal(db, usuarioId, carrito, callback) {
+    let total = 0;
+    const items = [];
+    db.all(`SELECT * FROM bonos_usuarios WHERE usuario_id=? AND usado=0`, [usuarioId], (err, bonos) => {
+      if (err) return callback(err);
+      let bonoTotal = bonos.reduce((sum, b) => sum + b.valor, 0);
+      let procesados = 0;
+      if (carrito.length === 0) return callback(null, { total:0, items: [] });
+
+      carrito.forEach(({ producto_id, cantidad }) => {
+        db.get(`SELECT * FROM productos WHERE id=? AND activo=1`, [producto_id], (err2, prod) => {
+          if (err2) return callback(err2);
+          if (!prod) return callback(new Error(`Producto ${producto_id} no encontrado o inactivo`));
+          if (prod.unidades < cantidad) return callback(new Error(`No hay suficiente inventario de ${prod.nombre}`));
+          const precioConDescuento = prod.precio * (1 - (prod.descuento || 0)/100);
+          let subtotal = precioConDescuento * cantidad;
+          const aplicableBono = Math.min(bonoTotal, subtotal);
+          subtotal -= aplicableBono;
+          bonoTotal -= aplicableBono;
+          items.push({ producto_id, cantidad, precio_unit: precioConDescuento, subtotal });
+          total += subtotal;
+          procesados++;
+          if (procesados === carrito.length) callback(null, { total, items, bonosAplicados: bonos.length - bonoTotal });
+        });
+      });
+    });
+  }
+
+  function registrarVenta(db, usuarioId, items, fechaEntrega, callback) {
+    const total = items.reduce((sum, i) => sum + i.subtotal, 0);
+    db.run(`INSERT INTO ventas (usuario_id, total, entrega) VALUES (?, ?, ?)`, [usuarioId, total, fechaEntrega.toISOString()], function(err) {
+      if (err) return callback(err);
+      const ventaId = this.lastID;
+      let procesados = 0;
+      items.forEach(({ producto_id, cantidad, precio_unit }) => {
+        db.run(`INSERT INTO venta_items (venta_id, producto_id, cantidad, precio_unit) VALUES (?, ?, ?, ?)`,
+          [ventaId, producto_id, cantidad, precio_unit], (err2) => {
+            if (err2) return callback(err2);
+            db.run(`UPDATE productos SET unidades = unidades - ? WHERE id=?`, [cantidad, producto_id], (err3) => {
+              if (err3) return callback(err3);
+              procesados++;
+              if (procesados === items.length) callback(null, ventaId);
+            });
+          });
+      });
+    });
+  }
+
+  // ----------------- Endpoint checkout -----------------
+  app.post('/api/checkout', (req, res) => {
+    const { token, entregaLat, entregaLng } = req.body;
+    if (!token) return res.status(400).json({ error: 'Falta token' });
+
+    db.get(`SELECT u.id, u.latitud, u.longitud FROM sesiones s JOIN usuarios u ON s.usuario_id=u.id WHERE s.token=?`, [token], (err, user) => {
+      if (err || !user) return res.status(401).json({ error: 'Sesión inválida' });
+
+      if (!dentroDelRango(entregaLat, entregaLng, TIENDA_LAT, TIENDA_LNG, MAX_KM)) {
+        return res.status(400).json({ error: 'Domicilio fuera del rango de entrega' });
       }
-    );
-  });
 
-  app.post('/api/login', (req, res) => {
-    const { nombre, pin } = req.body;
-    if (!nombre || !pin) return res.status(400).json({ error: 'Debe ingresar nombre y pin' });
+      db.all(`SELECT producto_id, cantidad FROM carritos WHERE usuario_id=?`, [user.id], (err2, carrito) => {
+        if (err2) return res.status(500).json({ error: err2.message });
+        if (carrito.length === 0) return res.status(400).json({ error: 'Carrito vacío' });
 
-    db.get(`SELECT * FROM usuarios WHERE nombre = ? AND pin = ?`, [nombre, pin], (err, user) => {
-      if (err) return res.status(500).json({ error: err.message });
-      if (!user) return res.status(401).json({ error: 'Credenciales inválidas' });
+        calcularTotal(db, user.id, carrito, (err3, { total, items }) => {
+          if (err3) return res.status(400).json({ error: err3.message });
 
-      if (user.estado === 'suspendido') {
-        if (!user.suspendido_hasta) return res.status(403).json({ error: 'Usuario suspendido permanentemente' });
-        if (new Date(user.suspendido_hasta) > new Date())
-          return res.status(403).json({ error: `Usuario suspendido hasta ${user.suspendido_hasta}` });
-        db.run(`UPDATE usuarios SET estado='activo', suspendido_hasta=NULL WHERE id=?`, [user.id]);
-      }
+          const ahora = new Date();
+          asignarBloqueEntrega(db, ahora, (err4, fechaEntrega) => {
+            if (err4) return res.status(500).json({ error: err4.message });
 
-      // Eliminar sesión previa
-      db.run(`DELETE FROM sesiones WHERE usuario_id=?`, [user.id], (err2) => {
-        if (err2) console.error('Error limpiando sesión previa:', err2);
+            registrarVenta(db, user.id, items, fechaEntrega, (err5, ventaId) => {
+              if (err5) return res.status(500).json({ error: err5.message });
 
-        const token = uuidv4();
-        db.run(`INSERT INTO sesiones (token, usuario_id) VALUES (?, ?)`, [token, user.id], (err3) => {
-          if (err3) return res.status(500).json({ error: 'No se pudo crear sesión' });
+              db.run(`DELETE FROM carritos WHERE usuario_id=?`, [user.id]);
 
-          res.json({
-            success: true,
-            token,
-            usuario: { id: user.id, nombre: user.nombre, estado: user.estado },
+              res.json({
+                success: true,
+                venta_id: ventaId,
+                total,
+                fecha_entrega: fechaEntrega.toISOString(),
+                items
+              });
+            });
           });
         });
       });
     });
   });
 
-  app.post('/api/logout', (req, res) => {
-    const { token } = req.body;
-    if (!token) return res.status(400).json({ error: 'Falta token' });
+  // ----------------- Suspensiones y retrasos automáticos -----------------
+  function suspenderEntregasTemporal(db, horas, callback) {
+    const ahora = new Date();
+    const finSuspension = new Date(ahora);
+    finSuspension.setHours(finSuspension.getHours() + horas);
 
-    db.run(`DELETE FROM sesiones WHERE token=?`, [token], (err) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json({ success: true });
+    db.run(`INSERT OR REPLACE INTO config (key, value) VALUES ('ventas_suspendidas', ?)`, [finSuspension.toISOString()], (err) => {
+      if (err) return callback(err);
+      db.all(`SELECT * FROM ventas WHERE entrega >= ? AND entrega <= ?`, [ahora.toISOString(), finSuspension.toISOString()], (err2, ventas) => {
+        if (err2) return callback(err2);
+        ventas.forEach(v => {
+          const nuevaEntrega = new Date(v.entrega);
+          nuevaEntrega.setHours(nuevaEntrega.getHours() + 3);
+          db.run(`UPDATE ventas SET entrega=? WHERE id=?`, [nuevaEntrega.toISOString(), v.id]);
+          generarAviso(db, v.usuario_id, `Tu entrega ha sido retrasada hasta ${nuevaEntrega.toISOString()}`, 'retraso');
+        });
+        callback(null, { message: `Entregas suspendidas por ${horas} horas`, afectadas: ventas.length });
+      });
     });
-  });
-
-  app.post('/api/session', (req, res) => {
-    const { token } = req.body;
-    if (!token) return res.status(400).json({ error: 'Falta token' });
-
-    db.get(
-      `SELECT u.id, u.nombre, u.estado FROM sesiones s JOIN usuarios u ON s.usuario_id = u.id WHERE s.token=?`,
-      [token],
-      (err, user) => {
-        if (err) return res.status(500).json({ error: err.message });
-        if (!user) return res.status(401).json({ error: 'Sesión inválida o expirada' });
-        res.json({ valid: true, user });
-      }
-    );
-  });
-
-  // ----------------- Endpoints admin -----------------
-  function esAdmin(req, res, next) {
-    const token = req.headers['x-token'];
-    if (!token) return res.status(401).json({ error: 'Falta token' });
-
-    db.get(
-      `SELECT u.nombre FROM sesiones s JOIN usuarios u ON s.usuario_id=u.id WHERE s.token=?`,
-      [token],
-      (err, user) => {
-        if (err || !user) return res.status(403).json({ error: 'Acceso denegado' });
-        if (user.nombre !== ADMIN_USER) return res.status(403).json({ error: 'Solo admin permitido' });
-        next();
-      }
-    );
   }
 
-  app.post('/api/admin/avisos', esAdmin, (req, res) => {
-    const { usuario_id, mensaje, tipo } = req.body;
-    if (!usuario_id || !mensaje) return res.status(400).json({ error: 'Faltan campos' });
+  function suspenderVentasDia(db, callback) {
+    const hoy = new Date();
+    hoy.setHours(0,0,0,0);
+    const mañana = new Date(hoy);
+    mañana.setDate(mañana.getDate() + 1);
 
-    db.run(`INSERT INTO avisos (usuario_id, mensaje, tipo) VALUES (?, ?, ?)`, [usuario_id, mensaje, tipo || 'info'], (err) => {
+    db.all(`SELECT * FROM ventas WHERE fecha >= ? AND fecha < ?`, [hoy.toISOString(), mañana.toISOString()], (err, ventas) => {
+      if (err) return callback(err);
+      ventas.forEach(v => {
+        const nuevaEntrega = new Date(v.entrega);
+        nuevaEntrega.setDate(nuevaEntrega.getDate() + 1);
+        db.run(`UPDATE ventas SET entrega=? WHERE id=?`, [nuevaEntrega.toISOString(), v.id]);
+        generarAviso(db, v.usuario_id, `Debido a suspensión de ventas, tu entrega se retrasa un día. Nueva entrega: ${nuevaEntrega.toISOString()}`, 'retraso');
+      });
+      callback(null, { message: `Ventas del día retrasadas`, afectadas: ventas.length });
+    });
+  }
+
+  app.post('/api/admin/suspender/horas', esAdmin, (req, res) => {
+    const { horas } = req.body;
+    if (!horas) return res.status(400).json({ error: 'Falta duración en horas' });
+    suspenderEntregasTemporal(db, horas, (err, info) => {
       if (err) return res.status(500).json({ error: err.message });
-      res.json({ success: true });
+      res.json(info);
     });
   });
 
-  app.post('/api/admin/usuarios/:id/suspender', esAdmin, (req, res) => {
-    const { id } = req.params;
-    const { hasta } = req.body;
-    const estado = 'suspendido';
-
-    db.run(
-      `UPDATE usuarios SET estado=?, suspendido_hasta=? WHERE id=?`,
-      [estado, hasta || null, id],
-      (err) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json({ success: true });
-      }
-    );
-  });
-
-  app.get('/api/admin/estadisticas', esAdmin, (req, res) => {
-    db.all(
-      `SELECT p.nombre, SUM(vi.cantidad) as unidades_vendidas, SUM(vi.cantidad*vi.precio_unit) as ingresos
-       FROM venta_items vi
-       JOIN productos p ON vi.producto_id = p.id
-       GROUP BY p.id`,
-      [],
-      (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json({ stats: rows });
-      }
-    );
-  });
-
-  // ----------------- Checkout con bonos y validación de rango -----------------
-  app.post('/api/checkout', (req, res) => {
-    const { token, entregaLat, entregaLng } = req.body;
-    if (!token) return res.status(400).json({ error: 'Falta token' });
-
-    db.get(
-      `SELECT u.id, u.latitud, u.longitud FROM sesiones s JOIN usuarios u ON s.usuario_id=u.id WHERE s.token=?`,
-      [token],
-      (err, user) => {
-        if (err || !user) return res.status(401).json({ error: 'Sesión inválida' });
-
-        if (!dentroDelRango(entregaLat, entregaLng, TIENDA_LAT, TIENDA_LNG, MAX_KM)) {
-          return res.status(400).json({ error: 'Domicilio fuera del rango de entrega' });
-        }
-
-        // Placeholder para calcular total, aplicar bonos y descuentos
-        res.json({ success: true, message: 'Checkout válido, aplicar cálculos de bonos y descuentos aquí' });
-      }
-    );
+  app.post('/api/admin/suspender/dia', esAdmin, (req, res) => {
+    suspenderVentasDia(db, (err, info) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json(info);
+    });
   });
 
   // ----------------- Iniciar servidor -----------------
