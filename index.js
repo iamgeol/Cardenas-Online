@@ -16,6 +16,18 @@ const MAX_KM = parseFloat(process.env.MAX_KM || 10);
 
 // Inicializamos la DB y luego insertamos admin si es necesario
 inicializarDB((db) => {
+  db.run(`CREATE TABLE IF NOT EXISTS pedidos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    usuario_id INTEGER,
+    fecha TEXT,
+    horario TEXT,
+    estado TEXT DEFAULT 'pendiente',
+    latitud REAL,
+    longitud REAL,
+    aviso_enviado INTEGER DEFAULT 0,
+    FOREIGN KEY(usuario_id) REFERENCES usuarios(id)
+  )`);
+
   if (ADMIN_USER && ADMIN_PIN) {
     db.get(`SELECT * FROM usuarios WHERE nombre = ?`, [ADMIN_USER], (err, row) => {
       if (err) console.error('Error buscando admin:', err);
@@ -41,10 +53,39 @@ inicializarDB((db) => {
     const a =
       Math.sin(dLat / 2) ** 2 +
       Math.cos(latUser * Math.PI / 180) *
-        Math.cos(latTienda * Math.PI / 180) *
-        Math.sin(dLng / 2) ** 2;
+      Math.cos(latTienda * Math.PI / 180) *
+      Math.sin(dLng / 2) ** 2;
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     return R * c <= maxKm;
+  }
+
+  function obtenerProximoDiaHabil(fecha) {
+    let nuevaFecha = new Date(fecha);
+    nuevaFecha.setDate(nuevaFecha.getDate() + 1);
+    while (nuevaFecha.getDay() === 6 || nuevaFecha.getDay() === 0) {
+      nuevaFecha.setDate(nuevaFecha.getDate() + 1);
+    }
+    return nuevaFecha;
+  }
+
+  function retrasarPedidos(db, horas, motivo) {
+    const ahora = new Date();
+    const retrasoMs = horas * 60 * 60 * 1000;
+    const nuevaHora = new Date(ahora.getTime() + retrasoMs);
+
+    db.all(`SELECT * FROM pedidos WHERE estado='pendiente'`, [], (err, pedidos) => {
+      if (err || !pedidos) return;
+
+      pedidos.forEach(p => {
+        const fechaActual = new Date(p.fecha);
+        if (fechaActual < nuevaHora) {
+          const nuevaFecha = obtenerProximoDiaHabil(ahora);
+          db.run(`UPDATE pedidos SET fecha=?, aviso_enviado=0 WHERE id=?`, [nuevaFecha.toISOString().split('T')[0], p.id]);
+          db.run(`INSERT INTO avisos (usuario_id, mensaje, tipo) VALUES (?, ?, ?)`,
+            [p.usuario_id, `Su pedido ha sido reprogramado por ${motivo}`, 'retraso']);
+        }
+      });
+    });
   }
 
   // ----------------- Rutas públicas -----------------
@@ -84,19 +125,12 @@ inicializarDB((db) => {
         db.run(`UPDATE usuarios SET estado='activo', suspendido_hasta=NULL WHERE id=?`, [user.id]);
       }
 
-      // Eliminar sesión previa
       db.run(`DELETE FROM sesiones WHERE usuario_id=?`, [user.id], (err2) => {
         if (err2) console.error('Error limpiando sesión previa:', err2);
-
         const token = uuidv4();
         db.run(`INSERT INTO sesiones (token, usuario_id) VALUES (?, ?)`, [token, user.id], (err3) => {
           if (err3) return res.status(500).json({ error: 'No se pudo crear sesión' });
-
-          res.json({
-            success: true,
-            token,
-            usuario: { id: user.id, nombre: user.nombre, estado: user.estado },
-          });
+          res.json({ success: true, token, usuario: { id: user.id, nombre: user.nombre, estado: user.estado } });
         });
       });
     });
@@ -105,7 +139,6 @@ inicializarDB((db) => {
   app.post('/api/logout', (req, res) => {
     const { token } = req.body;
     if (!token) return res.status(400).json({ error: 'Falta token' });
-
     db.run(`DELETE FROM sesiones WHERE token=?`, [token], (err) => {
       if (err) return res.status(500).json({ error: err.message });
       res.json({ success: true });
@@ -115,7 +148,6 @@ inicializarDB((db) => {
   app.post('/api/session', (req, res) => {
     const { token } = req.body;
     if (!token) return res.status(400).json({ error: 'Falta token' });
-
     db.get(
       `SELECT u.id, u.nombre, u.estado FROM sesiones s JOIN usuarios u ON s.usuario_id = u.id WHERE s.token=?`,
       [token],
@@ -131,7 +163,6 @@ inicializarDB((db) => {
   function esAdmin(req, res, next) {
     const token = req.headers['x-token'];
     if (!token) return res.status(401).json({ error: 'Falta token' });
-
     db.get(
       `SELECT u.nombre FROM sesiones s JOIN usuarios u ON s.usuario_id=u.id WHERE s.token=?`,
       [token],
@@ -146,7 +177,6 @@ inicializarDB((db) => {
   app.post('/api/admin/avisos', esAdmin, (req, res) => {
     const { usuario_id, mensaje, tipo } = req.body;
     if (!usuario_id || !mensaje) return res.status(400).json({ error: 'Faltan campos' });
-
     db.run(`INSERT INTO avisos (usuario_id, mensaje, tipo) VALUES (?, ?, ?)`, [usuario_id, mensaje, tipo || 'info'], (err) => {
       if (err) return res.status(500).json({ error: err.message });
       res.json({ success: true });
@@ -157,15 +187,10 @@ inicializarDB((db) => {
     const { id } = req.params;
     const { hasta } = req.body;
     const estado = 'suspendido';
-
-    db.run(
-      `UPDATE usuarios SET estado=?, suspendido_hasta=? WHERE id=?`,
-      [estado, hasta || null, id],
-      (err) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json({ success: true });
-      }
-    );
+    db.run(`UPDATE usuarios SET estado=?, suspendido_hasta=? WHERE id=?`, [estado, hasta || null, id], (err) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ success: true });
+    });
   });
 
   app.get('/api/admin/estadisticas', esAdmin, (req, res) => {
@@ -187,62 +212,50 @@ inicializarDB((db) => {
     const { token, entregaLat, entregaLng } = req.body;
     if (!token) return res.status(400).json({ error: 'Falta token' });
 
-    db.get(
-      `SELECT u.id, u.latitud, u.longitud FROM sesiones s JOIN usuarios u ON s.usuario_id=u.id WHERE s.token=?`,
+    db.get(`SELECT u.id, u.latitud, u.longitud FROM sesiones s JOIN usuarios u ON s.usuario_id=u.id WHERE s.token=?`,
       [token],
       (err, user) => {
         if (err || !user) return res.status(401).json({ error: 'Sesión inválida' });
-
         if (!dentroDelRango(entregaLat, entregaLng, TIENDA_LAT, TIENDA_LNG, MAX_KM)) {
           return res.status(400).json({ error: 'Domicilio fuera del rango de entrega (1.6 km máximo)' });
         }
-
-        // Placeholder para calcular total, aplicar bonos y descuentos
-        res.json({ success: true, message: 'Checkout válido, aplicar cálculos de bonos y descuentos aquí' });
+        res.json({ success: true, message: 'Checkout válido' });
       }
     );
   });
 
-  // ----------------- 🕒 Nueva lógica para programación de pedidos -----------------
-  function obtenerProximoDiaHabil(fecha) {
-    let nuevaFecha = new Date(fecha);
-    nuevaFecha.setDate(nuevaFecha.getDate() + 1);
-    while (nuevaFecha.getDay() === 6 || nuevaFecha.getDay() === 0) { // 6=sábado, 0=domingo
-      nuevaFecha.setDate(nuevaFecha.getDate() + 1);
-    }
-    return nuevaFecha;
-  }
-
+  // ----------------- Programación y almacenamiento de pedidos -----------------
   app.post('/api/pedidos/programar', (req, res) => {
+    const { token, latitud, longitud } = req.body;
+    if (!token) return res.status(400).json({ error: 'Falta token' });
+
     const ahora = new Date();
     const horaActual = ahora.getHours() + ahora.getMinutes() / 60;
-
+    const horaLimite = 7 + 30 / 60;
     let fechaEntrega = new Date(ahora);
-    const horaLimite = 7 + 30 / 60; // 7:30 am
+    if (horaActual > horaLimite) fechaEntrega = obtenerProximoDiaHabil(ahora);
 
-    if (horaActual > horaLimite) {
-      fechaEntrega = obtenerProximoDiaHabil(ahora);
-    }
+    db.get(`SELECT usuario_id FROM sesiones WHERE token=?`, [token], (err, sesion) => {
+      if (err || !sesion) return res.status(401).json({ error: 'Sesión inválida' });
 
-    // Contar pedidos en los dos turnos
-    db.all(`SELECT COUNT(*) as total, horario FROM pedidos WHERE fecha = date(?) GROUP BY horario`, [fechaEntrega.toISOString().split('T')[0]], (err, rows) => {
-      if (err) return res.status(500).json({ error: err.message });
+      db.all(`SELECT COUNT(*) as total, horario FROM pedidos WHERE fecha=date(?) GROUP BY horario`,
+        [fechaEntrega.toISOString().split('T')[0]], (err2, rows) => {
+          if (err2) return res.status(500).json({ error: err2.message });
+          const turnoManana = rows.find(r => r.horario === 'mañana')?.total || 0;
+          const turnoTarde = rows.find(r => r.horario === 'tarde')?.total || 0;
+          let horario = turnoManana < 20 ? 'mañana' : turnoTarde < 20 ? 'tarde' : null;
+          if (!horario) {
+            fechaEntrega = obtenerProximoDiaHabil(fechaEntrega);
+            horario = 'mañana';
+          }
 
-      const turnoManana = rows.find(r => r.horario === 'mañana')?.total || 0;
-      const turnoTarde = rows.find(r => r.horario === 'tarde')?.total || 0;
-
-      let horario = turnoManana < 20 ? 'mañana' : turnoTarde < 20 ? 'tarde' : null;
-
-      if (!horario) {
-        fechaEntrega = obtenerProximoDiaHabil(fechaEntrega);
-        horario = 'mañana';
-      }
-
-      res.json({
-        success: true,
-        fechaEntrega: fechaEntrega.toISOString().split('T')[0],
-        horario,
-      });
+          db.run(`INSERT INTO pedidos (usuario_id, fecha, horario, latitud, longitud) VALUES (?, ?, ?, ?, ?)`,
+            [sesion.usuario_id, fechaEntrega.toISOString().split('T')[0], horario, latitud || 0, longitud || 0],
+            function (err3) {
+              if (err3) return res.status(500).json({ error: err3.message });
+              res.json({ success: true, pedido_id: this.lastID, fechaEntrega: fechaEntrega.toISOString().split('T')[0], horario });
+            });
+        });
     });
   });
 
