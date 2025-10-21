@@ -7,7 +7,7 @@ const { inicializarDB, DB_PATH } = require('./db');
 const app = express();
 app.use(bodyParser.json());
 
-// Variables de entorno
+// Variables de entorno (Render)
 const ADMIN_USER = process.env.ADMIN_USER;
 const ADMIN_PIN = process.env.ADMIN_PIN;
 const TIENDA_LAT = parseFloat(process.env.TIENDA_LAT || 0);
@@ -194,13 +194,56 @@ inicializarDB((db) => {
         if (err || !user) return res.status(401).json({ error: 'Sesión inválida' });
 
         if (!dentroDelRango(entregaLat, entregaLng, TIENDA_LAT, TIENDA_LNG, MAX_KM)) {
-          return res.status(400).json({ error: 'Domicilio fuera del rango de entrega' });
+          return res.status(400).json({ error: 'Domicilio fuera del rango de entrega (1.6 km máximo)' });
         }
 
         // Placeholder para calcular total, aplicar bonos y descuentos
         res.json({ success: true, message: 'Checkout válido, aplicar cálculos de bonos y descuentos aquí' });
       }
     );
+  });
+
+  // ----------------- 🕒 Nueva lógica para programación de pedidos -----------------
+  function obtenerProximoDiaHabil(fecha) {
+    let nuevaFecha = new Date(fecha);
+    nuevaFecha.setDate(nuevaFecha.getDate() + 1);
+    while (nuevaFecha.getDay() === 6 || nuevaFecha.getDay() === 0) { // 6=sábado, 0=domingo
+      nuevaFecha.setDate(nuevaFecha.getDate() + 1);
+    }
+    return nuevaFecha;
+  }
+
+  app.post('/api/pedidos/programar', (req, res) => {
+    const ahora = new Date();
+    const horaActual = ahora.getHours() + ahora.getMinutes() / 60;
+
+    let fechaEntrega = new Date(ahora);
+    const horaLimite = 7 + 30 / 60; // 7:30 am
+
+    if (horaActual > horaLimite) {
+      fechaEntrega = obtenerProximoDiaHabil(ahora);
+    }
+
+    // Contar pedidos en los dos turnos
+    db.all(`SELECT COUNT(*) as total, horario FROM pedidos WHERE fecha = date(?) GROUP BY horario`, [fechaEntrega.toISOString().split('T')[0]], (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+
+      const turnoManana = rows.find(r => r.horario === 'mañana')?.total || 0;
+      const turnoTarde = rows.find(r => r.horario === 'tarde')?.total || 0;
+
+      let horario = turnoManana < 20 ? 'mañana' : turnoTarde < 20 ? 'tarde' : null;
+
+      if (!horario) {
+        fechaEntrega = obtenerProximoDiaHabil(fechaEntrega);
+        horario = 'mañana';
+      }
+
+      res.json({
+        success: true,
+        fechaEntrega: fechaEntrega.toISOString().split('T')[0],
+        horario,
+      });
+    });
   });
 
   // ----------------- Iniciar servidor -----------------
