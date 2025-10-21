@@ -1,19 +1,16 @@
-// db.js - Inicializa la base de datos SQLite con tablas y datos de ejemplo
+// db.js - inicializa la base de datos SQLite con tablas y datos de ejemplo
 const sqlite3 = require('sqlite3').verbose();
 const fs = require('fs');
 const path = require('path');
 
-// Carpeta local de datos (compatible con Render)
 const DATA_DIR = path.join(__dirname, 'data');
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-}
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
 
 const DB_PATH = path.join(DATA_DIR, 'data.db');
 const db = new sqlite3.Database(DB_PATH);
 
 db.serialize(() => {
-  // 🧱 Tabla de usuarios
+  // usuarios
   db.run(`CREATE TABLE IF NOT EXISTS usuarios (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     nombre TEXT UNIQUE,
@@ -29,26 +26,26 @@ db.serialize(() => {
     fecha_registro TEXT DEFAULT (datetime('now'))
   )`);
 
-  // 🔑 Tabla de sesiones
+  // sesiones (token)
   db.run(`CREATE TABLE IF NOT EXISTS sesiones (
     token TEXT PRIMARY KEY,
     usuario_id INTEGER,
     creado_en TEXT DEFAULT (datetime('now'))
   )`);
 
-  // 🛒 Productos
+  // productos
   db.run(`CREATE TABLE IF NOT EXISTS productos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     nombre TEXT,
     descripcion TEXT,
     precio REAL,
     unidades INTEGER,
-    descuento REAL DEFAULT 0,
+    descuento REAL DEFAULT 0, -- porcentaje (0..100)
     activo INTEGER DEFAULT 1,
     creado_en TEXT DEFAULT (datetime('now'))
   )`);
 
-  // 🧺 Carritos
+  // carritos (temporal)
   db.run(`CREATE TABLE IF NOT EXISTS carritos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     usuario_id INTEGER,
@@ -58,7 +55,7 @@ db.serialize(() => {
     expira_en TEXT
   )`);
 
-  // 💰 Ventas
+  // ventas / orders
   db.run(`CREATE TABLE IF NOT EXISTS ventas (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     usuario_id INTEGER,
@@ -66,7 +63,7 @@ db.serialize(() => {
     fecha TEXT DEFAULT (datetime('now'))
   )`);
 
-  // 📦 Detalle de venta
+  // detalle de venta
   db.run(`CREATE TABLE IF NOT EXISTS venta_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     venta_id INTEGER,
@@ -75,7 +72,7 @@ db.serialize(() => {
     precio_unit REAL
   )`);
 
-  // 🔔 Avisos
+  // avisos
   db.run(`CREATE TABLE IF NOT EXISTS avisos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     usuario_id INTEGER,
@@ -86,13 +83,13 @@ db.serialize(() => {
     leido INTEGER DEFAULT 0
   )`);
 
-  // ⚙️ Config general
+  // config (ventas suspendidas)
   db.run(`CREATE TABLE IF NOT EXISTS config (
     key TEXT PRIMARY KEY,
     value TEXT
   )`);
 
-  // 📊 Descuentos globales
+  // descuentos globales por producto histórico
   db.run(`CREATE TABLE IF NOT EXISTS descuentos_productos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     producto_id INTEGER,
@@ -101,14 +98,14 @@ db.serialize(() => {
     fin TEXT
   )`);
 
-  // Valor por defecto de configuración
+  // registrar config default si no existe
   db.get(`SELECT value FROM config WHERE key='ventas_suspendidas'`, (err, row) => {
     if (!row) {
       db.run(`INSERT INTO config (key, value) VALUES ('ventas_suspendidas', '0')`);
     }
   });
 
-  // 🧩 Crear usuario administrador de forma segura
+  // 🧩 Crear usuario administrador automáticamente
   const ADMIN_USER = process.env.ADMIN_USER;
   const ADMIN_PIN = process.env.ADMIN_PIN;
 
@@ -118,7 +115,7 @@ db.serialize(() => {
         db.run(
           `INSERT INTO usuarios (nombre, pin, telefono, domicilio, rango_valido, bono, estado)
            VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [ADMIN_USER, ADMIN_PIN, '0000000000', 'Oficina Central', 1, 0, 'activo'],
+          [ADMIN_USER, ADMIN_PIN, '0000000000', 'Oficina central', 1, 0, 'activo'],
           (err2) => {
             if (err2) console.error("❌ Error creando admin:", err2);
             else console.log(`✅ Usuario administrador creado: ${ADMIN_USER}`);
@@ -129,10 +126,10 @@ db.serialize(() => {
       }
     });
   } else {
-    console.log("⚠️ ADMIN_USER o ADMIN_PIN no definidos en variables de entorno.");
+    console.log("⚠️ Variables ADMIN_USER y ADMIN_PIN no configuradas (Render).");
   }
 
-  console.log('🗄️ Tablas creadas o verificadas en', DB_PATH);
+  console.log('Tablas creadas o verificadas en', DB_PATH);
 });
 
 db.close();
