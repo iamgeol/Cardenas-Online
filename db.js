@@ -1,16 +1,16 @@
-// db.js - inicializa la base de datos SQLite con tablas y datos de ejemplo
+// db.js - Inicializa la base de datos SQLite con todas las tablas necesarias
 const sqlite3 = require('sqlite3').verbose();
 const fs = require('fs');
 const path = require('path');
 
 const DATA_DIR = path.join(__dirname, 'data');
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const DB_PATH = path.join(DATA_DIR, 'data.db');
 const db = new sqlite3.Database(DB_PATH);
 
 db.serialize(() => {
-  // usuarios
+  // Tabla de usuarios
   db.run(`CREATE TABLE IF NOT EXISTS usuarios (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     nombre TEXT UNIQUE,
@@ -26,26 +26,26 @@ db.serialize(() => {
     fecha_registro TEXT DEFAULT (datetime('now'))
   )`);
 
-  // sesiones (token)
+  // Tabla de sesiones (tokens)
   db.run(`CREATE TABLE IF NOT EXISTS sesiones (
     token TEXT PRIMARY KEY,
     usuario_id INTEGER,
     creado_en TEXT DEFAULT (datetime('now'))
   )`);
 
-  // productos
+  // Tabla de productos
   db.run(`CREATE TABLE IF NOT EXISTS productos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     nombre TEXT,
     descripcion TEXT,
     precio REAL,
     unidades INTEGER,
-    descuento REAL DEFAULT 0, -- porcentaje (0..100)
+    descuento REAL DEFAULT 0,
     activo INTEGER DEFAULT 1,
     creado_en TEXT DEFAULT (datetime('now'))
   )`);
 
-  // carritos (temporal)
+  // Carritos temporales
   db.run(`CREATE TABLE IF NOT EXISTS carritos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     usuario_id INTEGER,
@@ -55,15 +55,16 @@ db.serialize(() => {
     expira_en TEXT
   )`);
 
-  // ventas / orders
+  // Ventas
   db.run(`CREATE TABLE IF NOT EXISTS ventas (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     usuario_id INTEGER,
     total REAL,
+    entrega REAL DEFAULT 0,
     fecha TEXT DEFAULT (datetime('now'))
   )`);
 
-  // detalle de venta
+  // Detalle de venta
   db.run(`CREATE TABLE IF NOT EXISTS venta_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     venta_id INTEGER,
@@ -72,7 +73,7 @@ db.serialize(() => {
     precio_unit REAL
   )`);
 
-  // avisos
+  // Avisos (incluye retrasos)
   db.run(`CREATE TABLE IF NOT EXISTS avisos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     usuario_id INTEGER,
@@ -83,13 +84,13 @@ db.serialize(() => {
     leido INTEGER DEFAULT 0
   )`);
 
-  // config (ventas suspendidas)
+  // Configuración general
   db.run(`CREATE TABLE IF NOT EXISTS config (
     key TEXT PRIMARY KEY,
     value TEXT
   )`);
 
-  // descuentos globales por producto histórico
+  // Descuentos globales por producto
   db.run(`CREATE TABLE IF NOT EXISTS descuentos_productos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     producto_id INTEGER,
@@ -98,38 +99,24 @@ db.serialize(() => {
     fin TEXT
   )`);
 
-  // registrar config default si no existe
+  // Bonos y descuentos individuales por usuario
+  db.run(`CREATE TABLE IF NOT EXISTS bonos_usuarios (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    usuario_id INTEGER,
+    tipo TEXT, -- 'bono' o 'descuento'
+    valor REAL, -- porcentaje o monto
+    aplicado_en TEXT, -- producto_id o null para general
+    motivo TEXT,
+    fecha TEXT DEFAULT (datetime('now')),
+    usado INTEGER DEFAULT 0
+  )`);
+
+  // Config default ventas suspendidas
   db.get(`SELECT value FROM config WHERE key='ventas_suspendidas'`, (err, row) => {
-    if (!row) {
-      db.run(`INSERT INTO config (key, value) VALUES ('ventas_suspendidas', '0')`);
-    }
+    if (!row) db.run(`INSERT INTO config (key, value) VALUES ('ventas_suspendidas','0')`);
   });
 
-  // 🧩 Crear usuario administrador automáticamente
-  const ADMIN_USER = process.env.ADMIN_USER;
-  const ADMIN_PIN = process.env.ADMIN_PIN;
-
-  if (ADMIN_USER && ADMIN_PIN) {
-    db.get(`SELECT * FROM usuarios WHERE nombre = ?`, [ADMIN_USER], (err, row) => {
-      if (!row) {
-        db.run(
-          `INSERT INTO usuarios (nombre, pin, telefono, domicilio, rango_valido, bono, estado)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [ADMIN_USER, ADMIN_PIN, '0000000000', 'Oficina central', 1, 0, 'activo'],
-          (err2) => {
-            if (err2) console.error("❌ Error creando admin:", err2);
-            else console.log(`✅ Usuario administrador creado: ${ADMIN_USER}`);
-          }
-        );
-      } else {
-        console.log(`ℹ️ Usuario administrador ya existe: ${ADMIN_USER}`);
-      }
-    });
-  } else {
-    console.log("⚠️ Variables ADMIN_USER y ADMIN_PIN no configuradas (Render).");
-  }
-
-  console.log('Tablas creadas o verificadas en', DB_PATH);
+  console.log('✅ Tablas creadas o verificadas en', DB_PATH);
 });
 
 db.close();
